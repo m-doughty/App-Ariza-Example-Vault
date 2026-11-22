@@ -1,0 +1,12 @@
+.precomp
+lib/.precomp
+.DS_Store
+*.swp
+*~
+
+# What `ariza bundle --app=.` writes: into the current directory when no
+# --out-dir is given, or into dist/ as the Pod's example does.
+ariza-example-vault-*/
+ariza-example-vault-*.tar.gz
+ariza-example-vault-*.tar.gz.sha256
+dist/

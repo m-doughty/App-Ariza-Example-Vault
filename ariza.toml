@@ -1,0 +1,120 @@
+[app]
+name = "App::Ariza::Example::Vault"   # dist name
+exec = "ariza-example-vault"          # launcher/binary name
+display = "Ariza Example Vault"
+
+[bundle]
+platforms = ["macos-arm64", "linux-x86_64-glibc", "windows-x86_64"]
+native = ["notcurses", "sqlcipher"]
+
+# Commands `ariza smoke` runs against a freshly built bundle, each with a
+# replaced (env -i style) environment. Every entry is argv, verbatim --
+# nothing goes through a shell, so there is no quoting layer to get wrong.
+# A "{raku}" command runs the bundled interpreter with the environment the
+# launcher would have set, so it stands in for code running inside the app.
+#
+# Before these, ariza proves the notcurses pack itself: for every bundle
+# whose native list contains notcurses it loads the full libnotcurses and
+# creates and destroys a visual without a terminal. Repeating that here
+# would run the identical check twice.
+#
+# The first command proves the launcher starts the app at all.
+#
+# The second proves the bundled SQLCipher works through the app's own
+# module: it creates an encrypted vault, writes to it, checks the file on
+# disk is not plain SQLite, then reopens it and reads the value back.
+# {tmp} has a space in its path, so this also proves the database layer
+# copes with one.
+#
+# The third proves the encryption is real rather than decorative: a vault
+# opened with the wrong passphrase must be refused with the app's own
+# WrongPassphrase error. A SQLCipher that silently fell back to plain
+# SQLite would pass the round trip above and fail here.
+smoke = [
+    ["{exec}", "--version"],
+    ["{raku}", "-e", '''
+use App::Ariza::Example::Vault;
+
+my $path = @*ARGS[0].IO.add('ariza-smoke-round-trip.db');
+$path.unlink if $path.e;
+
+my $vault = App::Ariza::Example::Vault.open($path, 'ariza-smoke-passphrase', :create);
+$vault.set('greeting', 'round-trip');
+$vault.close;
+
+my $file = $path.open(:bin);
+my $head = $file.read(16).decode('latin-1');
+$file.close;
+die 'the vault was written as plain SQLite' if $head.starts-with('SQLite format 3');
+
+my $again = App::Ariza::Example::Vault.open($path, 'ariza-smoke-passphrase');
+my $value = $again.get('greeting');
+$again.close;
+die "the value did not survive the round trip: {$value.raku}" unless ($value // '') eq 'round-trip';
+
+say 'ok: encrypted vault created, written and reopened';
+''', "{tmp}"],
+    ["{raku}", "-e", '''
+use App::Ariza::Example::Vault;
+
+my $path = @*ARGS[0].IO.add('ariza-smoke-wrong-passphrase.db');
+$path.unlink if $path.e;
+
+my $vault = App::Ariza::Example::Vault.open($path, 'the right passphrase', :create);
+$vault.set('secret', 'kept');
+$vault.close;
+
+my $opened = try App::Ariza::Example::Vault.open($path, 'the wrong passphrase');
+with $opened {
+    .close;
+    die 'a wrong passphrase opened the vault';
+}
+die "expected WrongPassphrase, got {$!.^name}: {$!.message}"
+    unless $! ~~ App::Ariza::Example::Vault::WrongPassphrase;
+
+say 'ok: a wrong passphrase is rejected';
+''', "{tmp}"],
+]
+
+# Where the generated install.sh / install.ps1 fetch releases from, and
+# the repository whose raw files the `curl … | sh` one-liner names.
+[installer]
+repo = "m-doughty/App-Ariza-Example-Vault"
+
+# An installer-managed copy checks for a newer release at most weekly and
+# asks before installing it. A bundle unpacked by hand never checks.
+[updates]
+enabled = true
+
+# Which ariza the release workflow installs to build the bundles. The
+# default is the published one from zef. This example points at ariza's
+# repository instead, so its bundles are built by the unreleased ariza and
+# act as a test of it; delete this table to go back to the published one.
+[ci]
+ariza-source = "https://github.com/m-doughty/App-Ariza.git"
+
+# What the bundle redistributes. Almost all of it is read out of the
+# bundle itself -- the notcurses pack's own licensing kit, ariza's record
+# of the vendored runtime, and every installed distribution's META6
+# `license` field -- so the only rows here are the ones nothing in the
+# bundle can answer for.
+[licensing]
+
+# NativeLibs (a DBIish dependency) declares its licence under the META6
+# key `licence`, the British spelling, which is not the `license` key any
+# tool reads. Without this row the build stops on a distribution with no
+# licence at all.
+[[licensing.dists]]
+name = "NativeLibs"
+spdx-license = "Artistic-2.0"
+project-url = "https://github.com/salortiz/NativeLibs"
+notes = """
+Licence from the distribution's own META6.json, which declares
+`"licence" : "Artistic-2.0"` -- the British spelling, which is not the
+META6 `license` key, so the field is invisible to zef and to ariza. The
+repository ships no LICENSE file and its README makes no licensing
+statement; the metadata declaration is the author's own. Verified at
+https://github.com/salortiz/NativeLibs/blob/master/META6.json (v0.0.9,
+the version DBIish depends on). The upstream fix is a one-character key
+rename, and this row goes away once it lands.
+"""

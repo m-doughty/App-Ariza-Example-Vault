@@ -1,0 +1,39 @@
+#!/usr/bin/env raku
+
+# The database comes from --db or ARIZA_EXAMPLE_VAULT_DB, the passphrase
+# from --passphrase-file or ARIZA_EXAMPLE_VAULT_PASSPHRASE. Exit status:
+# 0 success, 1 no such key, 2 anything else.
+
+use App::Ariza::Example::Vault::CLI;
+
+my %*SUB-MAIN-OPTS = :named-anywhere;
+
+#| Print the version and exit
+multi MAIN(Bool :$version! where *.so) {
+	say version-line();
+}
+
+#| Store VALUE under KEY; with no VALUE, read it from standard input
+multi MAIN('set', Str:D $key, Str $value?, Str :$db, Str :$passphrase-file) {
+	exit run-command('set', $key, |($value // Empty), :$db, :$passphrase-file);
+}
+
+#| Print the value stored under KEY
+multi MAIN('get', Str:D $key, Str :$db, Str :$passphrase-file) {
+	exit run-command('get', $key, :$db, :$passphrase-file);
+}
+
+#| Print every key, one per line
+multi MAIN('list', Str :$db, Str :$passphrase-file) {
+	exit run-command('list', :$db, :$passphrase-file);
+}
+
+#| Remove the entry stored under KEY
+multi MAIN('delete', Str:D $key, Str :$db, Str :$passphrase-file) {
+	exit run-command('delete', $key, :$db, :$passphrase-file);
+}
+
+#| Draw every key and value as a table (needs a terminal)
+multi MAIN('show', Str :$db, Str :$passphrase-file) {
+	exit run-command('show', :$db, :$passphrase-file);
+}

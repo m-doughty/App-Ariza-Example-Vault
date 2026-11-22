@@ -1,0 +1,77 @@
+use Test;
+
+use App::Ariza::Example::Vault;
+use App::Ariza::Example::Vault::Show;
+
+# Everything about `show` that runs without a terminal. Drawing itself
+# needs one (notcurses direct mode on a real tty) and is not covered here.
+
+# Two columns for CJK and emoji, one for everything else: a stand-in
+# for a terminal's widths that does not depend on the locale.
+sub wide(Str:D $text --> Int:D) {
+	$text.comb.map({ .ord >= 0x1100 && .ord != 0x2026 ?? 2 !! 1 }).sum;
+}
+
+subtest 'visible', {
+	is visible('plain text, ünïcödé, 日本'), 'plain text, ünïcödé, 日本', 'printable text is untouched';
+	is visible("a\nb"), 'a␊b', 'a newline becomes its control picture';
+	is visible("\e[31mred"), '␛[31mred', 'an escape sequence is defused';
+	is visible("\t\x[0]\x[7F]"), '␉␀␡', 'tab, NUL and DEL';
+	is visible("c1\x[85]\x[9B]"), 'c1��', 'C1 controls become U+FFFD';
+	is visible(''), '', 'empty stays empty';
+}
+
+subtest 'layout', {
+	my @rows = layout(('a' => 'one', 'longer-key' => 'two'), :columns(40), :width(*.chars));
+	is-deeply @rows.List, (('a         ', 'one'), ('longer-key', 'two')),
+		'keys are padded to the widest';
+
+	@rows = layout(('a-long-key' => 'a value that will not fit',), :columns(24), :width(*.chars));
+	is-deeply @rows.List, (('a-long-key', 'a value tha…'),), 'values are cut to fit, marked with …';
+
+	@rows = layout(('k' => 'x' x 10,), :columns(13), :width(*.chars));
+	is @rows[0][1], 'x' x 10, 'a value that exactly fits is not cut';
+
+	@rows = layout(('k' => 'x' x 11,), :columns(13), :width(*.chars));
+	is @rows[0][1], 'x' x 9 ~ '…', 'one column too many is cut, leaving room for the marker';
+
+	@rows = layout(('k' x 30 => 'v',), :columns(20), :width(*.chars));
+	is @rows[0][0], 'k' x 9 ~ '…', 'a key wider than half the screen is cut';
+	is @rows[0][1], 'v', 'and the value still fits beside it';
+
+	@rows = layout(('鍵' => '値です',), :columns(8), :width(&wide));
+	is-deeply @rows.List, (('鍵', '値…'),), 'wide characters are never split across the edge';
+
+	@rows = layout(("line\nbreak" => "tab\there",), :columns(40), :width(*.chars));
+	is-deeply @rows.List, (('line␊break', 'tab␉here'),), 'control characters are made visible first';
+
+	@rows = layout(('k' => 'value',), :columns(1), :width(*.chars));
+	is @rows[0][0], 'k', 'a one-column screen still has a key';
+	is @rows[0][1], '…', 'and a marker where the value would be';
+
+	is layout((), :columns(80), :width(*.chars)), (), 'no entries, no rows';
+	is-deeply layout(('' => '',), :columns(80), :width(*.chars)), ((' ', ''),),
+		'an empty key and value keep a one-column key cell';
+}
+
+subtest 'cell-width asks libnotcurses', {
+	is cell-width('abc'), 3, 'plain ASCII';
+	is cell-width(''), 0, 'empty';
+	is cell-width('a b c'), 5, 'spaces count';
+}
+
+subtest 'show needs a terminal', {
+	my $file = $*TMPDIR.add("ariza-example-vault t03 {$*PID}-{(^1_000_000).pick}.out");
+	{
+		my $*OUT = $file.open(:w);
+		LEAVE $*OUT.close;
+		throws-like { show(('k' => 'v',), :title('one entry')) },
+			App::Ariza::Example::Vault::Error,
+			message => / 'not one' .* '`list`' /,
+			'standard output that is a file is refused';
+	}
+	is $file.slurp, '', 'and nothing was written to it';
+	$file.unlink;
+}
+
+done-testing;

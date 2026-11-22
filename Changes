@@ -1,0 +1,10 @@
+Revision history for App::Ariza::Example::Vault
+
+{{$NEXT}}
+    - First version. An encrypted key/value vault: SQLCipher through
+      DBIish, with set, get, list and delete commands for scripts and a
+      show command that draws a table with notcurses direct mode. The
+      database path and passphrase come from options or environment
+      variables and are never prompted for. ariza.toml bundles it with
+      both native libraries and smoke-checks an encrypted round trip
+      and a wrong-passphrase rejection in a clean environment.

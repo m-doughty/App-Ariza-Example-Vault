@@ -1,0 +1,72 @@
+use Test;
+
+# The distribution's metadata against what is actually in it.
+
+my $root = $*PROGRAM.parent.parent;
+my %meta = Distribution::Path.new($root).meta;
+
+# Modules that ship with Rakudo and need no entry in depends.
+my constant CORE-MODULES = set <NativeCall Test>;
+
+sub files-under(IO::Path $dir --> List) {
+	my @found;
+	my @todo = $dir;
+	while @todo {
+		for @todo.shift.dir -> $path {
+			next if $path.basename eq '.precomp';
+			$path.d ?? @todo.push($path) !! @found.push($path);
+		}
+	}
+	@found.List;
+}
+
+subtest 'identity', {
+	is %meta<name>, 'App::Ariza::Example::Vault', 'dist name';
+	is %meta<auth>, 'zef:apogee', 'auth';
+	is %meta<license>, 'Artistic-2.0', 'license';
+	like %meta<version>, / ^ \d+ '.' \d+ '.' \d+ $ /, 'version is X.Y.Z';
+	ok $root.add('LICENSE').f, 'LICENSE is present';
+	like $root.add('Changes').slurp, / '{{$NEXT}}' /, 'Changes has a {{$NEXT}} stanza';
+}
+
+subtest 'provides matches lib/', {
+	my %provides = %meta<provides>;
+	my @files = files-under($root.add('lib')).grep(*.extension eq 'rakumod')
+		.map(*.relative($root).subst('\\', '/', :g)).sort;
+	is-deeply %provides.values.sort.List, @files.List, 'every module file is provided, and nothing else';
+	for %provides.kv -> $module, $file {
+		is $file, 'lib/' ~ $module.subst('::', '/', :g) ~ '.rakumod', "$module lives where its name says";
+	}
+}
+
+subtest 'every module used is declared', {
+	my %provides = %meta<provides>;
+	my %declared = %meta<depends>.map({ .subst(/ ':' <[a..z]>+ '<' .* $ /, '') => True });
+	my @sources = |files-under($root.add('lib')), |files-under($root.add('bin'));
+	my %used;
+	for @sources -> $file {
+		for $file.slurp.lines -> $line {
+			%used{~$0} = True if $line ~~ / ^ \s* [use|need|require] \s+ (<[\w:-]>+) /;
+		}
+	}
+	for %used.keys.sort -> $module {
+		next if $module eq 'v6' | 'v6.d';
+		next if $module (elem) CORE-MODULES;
+		next if %provides{$module}:exists;
+		# A dist's own submodules (Notcurses::Native::Types) come with it.
+		ok %declared.keys.first({ $module eq $_ || $module.starts-with($_ ~ '::') }),
+			"$module is in depends";
+	}
+	for %declared.keys.sort -> $dist {
+		ok %used.keys.first({ $_ eq $dist || .starts-with($dist ~ '::') }), "$dist in depends is used";
+	}
+}
+
+subtest 'ariza.toml names this distribution', {
+	my $toml = $root.add('ariza.toml').slurp;
+	like $toml, / ^^ 'name = "' $(%meta<name>) '"' /, 'app.name is the dist name';
+	like $toml, / ^^ 'exec = "ariza-example-vault"' /, 'app.exec is the executable';
+	ok $root.add('bin').add('ariza-example-vault').f, 'the executable exists';
+}
+
+done-testing;

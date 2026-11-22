@@ -1,0 +1,225 @@
+use Test;
+
+use App::Ariza::Example::Vault;
+use App::Ariza::Example::Vault::CLI;
+use App::Ariza::Example::Vault::NativeLib;
+
+# The commands in-process, then the executable as a user runs it.
+
+my constant PASS = 'correct horse battery staple';
+my constant DB-ENV = 'ARIZA_EXAMPLE_VAULT_DB';
+my constant PASSPHRASE-ENV = 'ARIZA_EXAMPLE_VAULT_PASSPHRASE';
+
+.diag with link-sqlcipher();
+
+my $root = $*PROGRAM.parent.parent;
+my $scratch = $*TMPDIR.add("ariza-example-vault t02 {$*PID}-{(^1_000_000).pick}");
+$scratch.mkdir;
+END {
+	if $scratch.d {
+		.unlink for $scratch.dir.grep(*.f);
+		$scratch.rmdir;
+	}
+}
+
+my $serial = 0;
+sub fresh-path(--> IO::Path) { $scratch.add("cli vault {++$serial}.db") }
+
+# Standard input stand-ins: a terminal nobody is typing into, and a pipe.
+class FakeTerminal {
+	method t(--> True) { }
+	method slurp { die 'read from a terminal' }
+}
+class FakePipe {
+	has Str $.text;
+	method t(--> False) { }
+	method slurp(--> Str) { $!text }
+}
+
+# Run one command, returning its status and what it printed.
+sub cli(*@words, :%env, :$in = FakePipe.new(:text('')), *%options --> Hash) {
+	my $out = $scratch.add("out {++$serial}");
+	my $err = $scratch.add("err {$serial}");
+	my $status = do {
+		my $*OUT = $out.open(:w);
+		my $*ERR = $err.open(:w);
+		my $*IN = $in;
+		LEAVE { $*OUT.close; $*ERR.close }
+		run-command(|@words, :%env, |%options);
+	};
+	my %result = status => $status, out => $out.slurp, err => $err.slurp;
+	.unlink for $out, $err;
+	%result;
+}
+
+sub env-for(IO::Path $path --> Hash) {
+	%( (DB-ENV) => $path.absolute, (PASSPHRASE-ENV) => PASS )
+}
+
+subtest 'version', {
+	my $meta-version = Distribution::Path.new($root).meta<version>;
+	like version-line(), / ^ 'App::Ariza::Example::Vault ' [ 'dev' | $meta-version ] $ /,
+		'the dist name and either the installed version or dev';
+}
+
+subtest 'set, get, list, delete', {
+	my $path = fresh-path;
+	my %env = env-for($path);
+
+	my %r = cli('set', 'api-token', '3f9a-77c1', :%env);
+	is %r<status>, 0, 'set succeeds';
+	is %r<out>, "stored 'api-token'\n", 'and says what it stored';
+	like %r<err>, / 'created a new vault at' /, 'creating the file is announced';
+	ok $path.e, 'the database exists now';
+
+	%r = cli('set', 'api-token', 'rotated', :%env);
+	is %r<out>, "replaced 'api-token'\n", 'overwriting says so';
+	is %r<err>, '', 'and announces nothing else';
+
+	%r = cli('get', 'api-token', :%env);
+	is (%r<status>, %r<out>), (0, "rotated\n"), 'get prints the value';
+
+	%r = cli('get', 'nope', :%env);
+	is %r<status>, 1, 'a missing key is status 1';
+	is %r<out>, '', 'with nothing on stdout';
+	like %r<err>, / "no such key 'nope'" /, 'and a reason on stderr';
+
+	cli('set', 'b-key', '', :%env);
+	%r = cli('get', 'b-key', :%env);
+	is (%r<status>, %r<out>), (0, "\n"), 'an empty value is still found';
+
+	%r = cli('list', :%env);
+	is (%r<status>, %r<out>), (0, "api-token\nb-key\n"), 'list prints keys in order';
+
+	%r = cli('delete', 'b-key', :%env);
+	is (%r<status>, %r<out>), (0, "deleted 'b-key'\n"), 'delete removes';
+	%r = cli('delete', 'b-key', :%env);
+	is %r<status>, 1, 'deleting again is status 1';
+	like %r<err>, / 'no such key' /, 'with a reason';
+}
+
+subtest 'values from standard input', {
+	my %env = env-for(fresh-path);
+	my %r = cli('set', 'notes', :%env, :in(FakePipe.new(:text("line one\nline two\n"))));
+	is %r<status>, 0, 'a piped value is stored';
+	is cli('get', 'notes', :%env)<out>, "line one\nline two\n", 'with one trailing newline removed';
+
+	%r = cli('set', 'crlf', :%env, :in(FakePipe.new(:text("windows\r\n"))));
+	is cli('get', 'crlf', :%env)<out>, "windows\n", 'a CRLF line ending counts as one';
+
+	my $path = fresh-path;
+	%r = cli('set', 'typed', :env(env-for($path)), :in(FakeTerminal.new));
+	is %r<status>, 2, 'no value and a terminal on stdin is refused';
+	like %r<err>, / 'no value given' /, 'with a reason';
+	nok $path.e, 'and no database was created';
+}
+
+subtest 'where the database and passphrase come from', {
+	my $from-env = fresh-path;
+	my $from-option = fresh-path;
+	my %env = env-for($from-env);
+
+	cli('set', 'k', 'option', :%env, :db($from-option.absolute));
+	ok $from-option.e, '--db wins over the variable';
+	nok $from-env.e, 'and the variable names nothing written';
+
+	my $file = $scratch.add('passphrase file.txt');
+	$file.spurt("{PASS}\n");
+	my %r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute )), :passphrase-file($file.absolute));
+	is (%r<status>, %r<out>), (0, "option\n"), 'a passphrase file, trailing newline and all';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute, (PASSPHRASE-ENV) => 'wrong' )),
+		:passphrase-file($file.absolute));
+	is %r<status>, 0, '--passphrase-file wins over the variable';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute, (PASSPHRASE-ENV) => 'wrong' )));
+	is %r<status>, 2, 'a wrong passphrase is status 2';
+	like %r<err>, / 'wrong passphrase' /, 'and says so';
+
+	%r = cli('get', 'k', :env(%()), :passphrase-file($file.absolute));
+	is %r<status>, 2, 'no database at all';
+	like %r<err>, / 'no database' .* $(DB-ENV) /, 'names the option and the variable';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => '' )), :passphrase-file($file.absolute));
+	like %r<err>, / 'no database' /, 'an empty variable is no database';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute )));
+	is %r<status>, 2, 'no passphrase at all';
+	like %r<err>, / 'no passphrase' .* $(PASSPHRASE-ENV) /, 'names the option and the variable';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute, (PASSPHRASE-ENV) => '' )));
+	like %r<err>, / 'passphrase is empty' /, 'an empty passphrase is refused';
+
+	%r = cli('get', 'k', :env(%( (DB-ENV) => $from-option.absolute )),
+		:passphrase-file($scratch.add('missing.txt').absolute));
+	like %r<err>, / 'cannot read the passphrase file' /, 'a missing passphrase file';
+
+	my $absent = fresh-path;
+	%r = cli('list', :env(env-for($absent)));
+	is %r<status>, 2, 'reading a vault that does not exist';
+	like %r<err>, / 'no vault' /, 'says so';
+	nok $absent.e, 'and creates nothing';
+}
+
+subtest 'refusals', {
+	my %env = env-for(fresh-path);
+	my %r = cli('frobnicate', :%env);
+	is %r<status>, 2, 'an unknown command';
+	like %r<err>, / 'unknown command' /, 'is named';
+
+	%r = cli('get', :%env);
+	is %r<status>, 2, 'a missing argument';
+	like %r<err>, / 'takes 1 argument' /, 'is explained';
+
+	%r = cli('set', "bad\nkey", 'v', :%env);
+	is %r<status>, 2, 'a key with a newline';
+	like %r<err>, / 'control characters' /, 'is refused before anything is written';
+
+	cli('set', 'k', 'v', :%env);
+	%r = cli('show', :%env);
+	is %r<status>, 2, 'show without a terminal';
+	like %r<err>, / 'not one' .* 'list' /, 'points at the script commands';
+}
+
+subtest 'the executable', {
+	# The whole search path, including zef's staging repositories during an install.
+	my @include = $*REPO.repo-chain.grep(CompUnit::Repository::Locally).map({ '-I' ~ .path-spec });
+	my $bin = $root.add('bin').add('ariza-example-vault').absolute;
+	my $path = fresh-path;
+	my %env = %*ENV;
+	%env{DB-ENV} = $path.absolute;
+	%env{PASSPHRASE-ENV} = PASS;
+
+	sub exe(*@args, Str :$input --> List) {
+		my $proc = run $*EXECUTABLE, |@include, $bin, |@args, :%env, :in, :out, :err;
+		$proc.in.print($input) if $input.defined;
+		# Closing a Proc's pipe hands back the Proc; sunk, a failed one throws.
+		my $ = $proc.in.close;
+		my $out = $proc.out.slurp(:close);
+		my $err = $proc.err.slurp(:close);
+		($proc.exitcode, $out, $err);
+	}
+
+	my ($status, $out) = exe('--version');
+	is $status, 0, '--version succeeds';
+	like $out, / ^ 'App::Ariza::Example::Vault ' \S+ \n $ /, 'and prints one line';
+
+	($status, $out) = exe('set', 'piped', :input("from a pipe\n"));
+	is $status, 0, 'set reads a pipe when no value is given';
+	($status, $out) = exe('get', 'piped');
+	is ($status, $out), (0, "from a pipe\n"), 'get prints it';
+
+	($status, $out) = exe('set', 'спасибо', 'большое 🙏');
+	($status, $out) = exe('get', 'спасибо');
+	is $out, "большое 🙏\n", 'unicode survives the command line';
+
+	($status, $out) = exe('get', 'absent');
+	is $status, 1, 'a missing key exits 1';
+
+	my $err;
+	($status, $out, $err) = exe();
+	is $status, 2, 'no command exits 2';
+	like $err, / 'Usage' /, 'with usage';
+}
+
+done-testing;

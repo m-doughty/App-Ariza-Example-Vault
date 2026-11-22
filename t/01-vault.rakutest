@@ -1,0 +1,198 @@
+use Test;
+use DBIish;
+
+use App::Ariza::Example::Vault;
+use App::Ariza::Example::Vault::NativeLib;
+
+# Real SQLCipher databases, in a scratch directory with a space in its name.
+
+my constant PASS = 'correct horse battery staple';
+my constant V = App::Ariza::Example::Vault;
+
+.diag with link-sqlcipher();
+
+my $scratch = $*TMPDIR.add("ariza-example-vault t01 {$*PID}-{(^1_000_000).pick}");
+$scratch.mkdir;
+END {
+	if $scratch.d {
+		.unlink for $scratch.dir.grep(*.f);
+		.rmdir for $scratch.dir.grep(*.d);
+		$scratch.rmdir;
+	}
+}
+
+my $serial = 0;
+sub fresh-path(--> IO::Path) { $scratch.add("vault {++$serial}.db") }
+
+sub header(IO::Path $path --> Str) {
+	my $file = $path.open(:bin);
+	LEAVE $file.close;
+	$file.read(16).decode('latin-1');
+}
+
+# A database DBIish wrote directly, for the files a vault must refuse.
+sub raw-database(IO::Path $path, Str $key, *@sql) {
+	my $dbh = DBIish.connect('SQLCipher', database => $path.absolute);
+	$dbh.key($key);
+	$dbh.do($_) for @sql;
+	$dbh.dispose;
+}
+
+# Without SQLCipher nothing below means anything: fail loudly, never skip.
+{
+	my $probe = fresh-path;
+	my $vault = try V.open($probe, PASS, :create);
+	without $vault {
+		diag $!.message;
+		bail-out 'SQLCipher is required to test the vault; see the message above';
+	}
+	$vault.close;
+}
+
+subtest 'create, write and reopen', {
+	my $path = fresh-path;
+	my $vault = V.open($path, PASS, :create);
+	nok $vault.set('greeting', 'hello'), 'a new key is not a replacement';
+	is $vault.get('greeting'), 'hello', 'read back on the same connection';
+	$vault.close;
+
+	nok header($path).starts-with('SQLite format 3'), 'the file on disk is not plain SQLite';
+
+	my $again = V.open($path, PASS);
+	is $again.get('greeting'), 'hello', 'the value survives a reopen';
+	is $again.path, $path, 'path is the one given';
+	$again.close;
+}
+
+subtest 'overwrite, missing and empty', {
+	my $vault = V.open(fresh-path, PASS, :create);
+	$vault.set('k', 'first');
+	ok $vault.set('k', 'second'), 'setting an existing key reports a replacement';
+	is $vault.get('k'), 'second', 'the new value wins';
+	is $vault.keys, ('k',), 'still one key';
+
+	my $missing = $vault.get('nope');
+	nok $missing.defined, 'a missing key is the undefined Str';
+	isa-ok $missing, Str;
+
+	$vault.set('empty', '');
+	my $empty = $vault.get('empty');
+	ok $empty.defined, 'an empty value is defined';
+	is $empty, '', 'and empty';
+	$vault.close;
+}
+
+subtest 'unicode, multi-line and awkward values', {
+	my $path = fresh-path;
+	my $vault = V.open($path, PASS, :create);
+	my %cases =
+		'שלום' => 'עולם',
+		'🔑 key' => '🔒 value',
+		'日本語' => '東京',
+		"e\x[301]" => "combining \x[301] mark",
+		'multi' => "line one\nline two\r\nline three",
+		'tab' => "a\tb",
+		q[it's; DROP TABLE vault_entries; --] => 'bound, never interpolated',
+		'big' => 'x' x 200_000,
+	;
+	$vault.set(.key, .value) for %cases;
+	$vault.close;
+
+	my $again = V.open($path, PASS);
+	is $again.get(.key), .value, "round trip: {.key.substr(0, 20).raku}" for %cases;
+	is $again.keys, %cases.keys.sort({ $^a.NFC.list cmp $^b.NFC.list }).List,
+		'keys come back in code-point order';
+	is-deeply $again.entries.map(*.key).List, $again.keys, 'entries are in the same order';
+	$again.close;
+}
+
+subtest 'delete', {
+	my $vault = V.open(fresh-path, PASS, :create);
+	$vault.set('a', '1');
+	$vault.set('b', '2');
+	ok $vault.delete('a'), 'deleting an existing key says so';
+	nok $vault.get('a').defined, 'and it is gone';
+	nok $vault.delete('a'), 'deleting it again says nothing was there';
+	nok $vault.delete('never'), 'deleting a key that never existed says the same';
+	is $vault.keys, ('b',), 'the other key is untouched';
+	$vault.close;
+}
+
+subtest 'wrong passphrase', {
+	my $path = fresh-path;
+	given V.open($path, PASS, :create) { .set('secret', 'kept'); .close }
+
+	throws-like { V.open($path, 'not the passphrase') },
+		V::WrongPassphrase, message => / 'wrong passphrase' /,
+		'a wrong passphrase is refused when opening';
+	throws-like { V.open($path, PASS.uc) }, V::WrongPassphrase, 'passphrases are case-sensitive';
+
+	my $vault = V.open($path, PASS);
+	is $vault.get('secret'), 'kept', 'the right passphrase still opens it afterwards';
+	$vault.close;
+}
+
+subtest 'files that are not vaults', {
+	my $plain = fresh-path;
+	raw-database($plain, '', 'CREATE TABLE t (a TEXT)');
+	ok header($plain).starts-with('SQLite format 3'), 'fixture: an empty key writes plain SQLite';
+	throws-like { V.open($plain, PASS) }, V::WrongPassphrase, 'a plain SQLite file is refused';
+
+	my $other = fresh-path;
+	raw-database($other, PASS, 'CREATE TABLE other (a TEXT)');
+	throws-like { V.open($other, PASS) }, V::Error, message => / 'not a vault' /,
+		'an encrypted database with another schema is refused';
+	throws-like { V.open($other, PASS, :create) }, V::Error, message => / 'not a vault' /,
+		'and :create does not add a vault to it';
+
+	my $empty = fresh-path;
+	$empty.spurt('');
+	throws-like { V.open($empty, PASS) }, V::Error, 'an empty file is not a vault without :create';
+	my $vault = V.open($empty, PASS, :create);
+	$vault.set('now', 'a vault');
+	$vault.close;
+	given V.open($empty, PASS) { is .get('now'), 'a vault', 'with :create it becomes one'; .close }
+}
+
+subtest 'refusals that write nothing', {
+	my $path = fresh-path;
+	throws-like { V.open($path, '', :create) }, V::Error, message => / 'passphrase is empty' /,
+		'an empty passphrase is refused';
+	nok $path.e, 'and no file was created';
+
+	throws-like { V.open($path, PASS) }, V::NoVault, message => / 'no vault' /,
+		'opening a missing vault without :create';
+	nok $path.e, 'creates nothing';
+
+	throws-like { V.open($scratch, PASS, :create) }, V::Error, message => / 'directory' /,
+		'a directory is refused';
+
+	my $nested = $scratch.add('no such dir').add('vault.db');
+	throws-like { V.open($nested, PASS, :create) }, V::Error, message => / 'could not open' /,
+		'a missing parent directory is an Error, not a crash';
+}
+
+subtest 'keys', {
+	my $vault = V.open(fresh-path, PASS, :create);
+	throws-like { $vault.set('', 'v') }, V::Error, message => / 'empty' /, 'an empty key';
+	throws-like { $vault.set("two\nlines", 'v') }, V::Error, message => / 'control' /, 'a newline in a key';
+	throws-like { $vault.set("bell\x[7]", 'v') }, V::Error, 'a C0 control in a key';
+	throws-like { $vault.set("c1\x[85]", 'v') }, V::Error, 'a C1 control in a key';
+	throws-like { V.check-key('') }, V::Error, 'check-key works on the class';
+	lives-ok { V.check-key('fine key, with spaces') }, 'spaces are fine';
+	is $vault.keys, (), 'nothing was stored by the refusals';
+
+	lives-ok { $vault.set(<42>, <7>) }, 'IntStr allomorphs from a command line bind';
+	is $vault.get('42'), '7', 'and read back as strings';
+	$vault.close;
+}
+
+subtest 'closing', {
+	my $vault = V.open(fresh-path, PASS, :create);
+	$vault.close;
+	lives-ok { $vault.close }, 'closing twice is fine';
+	throws-like { $vault.get('x') }, V::Error, message => / 'closed' /, 'a closed vault says so';
+	throws-like { $vault.set('x', 'y') }, V::Error, message => / 'closed' /, 'for writes too';
+}
+
+done-testing;

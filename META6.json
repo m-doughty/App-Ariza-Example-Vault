@@ -1,0 +1,36 @@
+{
+  "auth": "zef:apogee",
+  "authors": [
+    "Matt Doughty"
+  ],
+  "build-depends": [
+  ],
+  "depends": [
+    "DBIish:ver<0.6.9+>:auth<zef:raku-community-modules>",
+    "MacOS::NativeLib:ver<0.0.6+>:auth<zef:lizmat>",
+    "Notcurses::Native:ver<0.8.1+>:auth<zef:apogee>"
+  ],
+  "description": "A tiny encrypted key/value vault, and a worked example of bundling an app with ariza",
+  "license": "Artistic-2.0",
+  "name": "App::Ariza::Example::Vault",
+  "perl": "6.d",
+  "provides": {
+    "App::Ariza::Example::Vault": "lib/App/Ariza/Example/Vault.rakumod",
+    "App::Ariza::Example::Vault::CLI": "lib/App/Ariza/Example/Vault/CLI.rakumod",
+    "App::Ariza::Example::Vault::NativeLib": "lib/App/Ariza/Example/Vault/NativeLib.rakumod",
+    "App::Ariza::Example::Vault::Show": "lib/App/Ariza/Example/Vault/Show.rakumod"
+  },
+  "resources": [
+  ],
+  "source-url": "https://github.com/m-doughty/App-Ariza-Example-Vault.git",
+  "tags": [
+    "ariza",
+    "example",
+    "sqlcipher",
+    "notcurses",
+    "vault"
+  ],
+  "test-depends": [
+  ],
+  "version": "0.0.1"
+}

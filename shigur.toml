@@ -1,0 +1,8 @@
+# Release settings for shigur. Every key is optional.
+name = "App::Ariza::Example::Vault"
+
+# A release is tagged only after this workflow is green on the release
+# commit. An empty jobs list means every job in it.
+[[ci.required-workflows]]
+workflow = "test.yml"
+jobs = []
