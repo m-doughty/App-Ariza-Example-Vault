@@ -24,6 +24,17 @@ END {
 my $serial = 0;
 sub fresh-path(--> IO::Path) { $scratch.add("vault {++$serial}.db") }
 
+# Order two keys by code point, as SQLite's ORDER BY does for text. Spelled out, because
+# Rakudo 2026.07 compares the two code-point sequences with cmp the wrong way round.
+sub by-code-point(Str $a, Str $b --> Order) {
+	my @a = $a.NFC.list;
+	my @b = $b.NFC.list;
+	for ^min(+@a, +@b) -> $i {
+		return @a[$i] <=> @b[$i] if @a[$i] != @b[$i];
+	}
+	+@a <=> +@b;
+}
+
 sub header(IO::Path $path --> Str) {
 	my $file = $path.open(:bin);
 	LEAVE $file.close;
@@ -100,7 +111,7 @@ subtest 'unicode, multi-line and awkward values', {
 
 	my $again = V.open($path, PASS);
 	is $again.get(.key), .value, "round trip: {.key.substr(0, 20).raku}" for %cases;
-	is $again.keys, %cases.keys.sort({ $^a.NFC.list cmp $^b.NFC.list }).List,
+	is $again.keys, %cases.keys.sort(&by-code-point).List,
 		'keys come back in code-point order';
 	is-deeply $again.entries.map(*.key).List, $again.keys, 'entries are in the same order';
 	$again.close;
